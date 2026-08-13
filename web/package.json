@@ -1,6 +1,6 @@
 {
   "name": "foxran-plugin-tool-optimizer-web",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {

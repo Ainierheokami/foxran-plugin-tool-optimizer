@@ -198,7 +198,8 @@
 
           <div class="field-grid two">
             <label class="field-block"><span>Temperature</span><input v-model.number="draft.optimizer.temperature" class="field-control" type="number" min="0" max="2" step="0.1" /></label>
-            <label class="field-block"><span>超时 ms</span><input v-model.number="draft.execution.timeout_ms" class="field-control" type="number" min="500" step="500" /></label>
+            <label class="field-block"><span>单次超时 ms</span><input v-model.number="draft.execution.timeout_ms" class="field-control" type="number" min="500" step="500" /></label>
+            <label class="field-block"><span>最多尝试次数</span><input v-model.number="draft.execution.max_retries" class="field-control" type="number" min="1" max="5" step="1" /></label>
           </div>
 
           <label class="field-block">
@@ -253,7 +254,7 @@
           <span class="run-identity"><strong>{{ run.tool_name }}</strong><small>{{ run.rule_name }}</small></span>
           <span class="path-list"><code v-for="path in run.paths" :key="path">{{ path }}</code><em v-if="!run.paths.length">未修改</em></span>
           <span>{{ run.model_name || '—' }}</span>
-          <span>{{ run.duration_ms == null ? '—' : `${run.duration_ms} ms` }}</span>
+          <span>{{ run.duration_ms == null ? '—' : `${run.duration_ms} ms` }}{{ (run.attempts || 1) > 1 ? ` · ${run.attempts} 次` : '' }}</span>
           <span>{{ formatRunTime(run.timestamp) }}</span>
         </div>
       </div>
@@ -310,7 +311,7 @@ function defaultRule(): OptimizationRule {
       instruction_template: '提高表达的清晰度、具体性和工具可执行性。',
       temperature: 0.2, max_tokens: 1200,
     },
-    execution: { timeout_ms: 15000, failure_policy: 'use_original', max_input_chars: 12000 },
+    execution: { timeout_ms: 15000, max_retries: 3, failure_policy: 'use_original', max_input_chars: 12000 },
     guardrails: { preserve_urls: true, preserve_references: true, deny_sensitive_fields: true, allow_unsafe_fields: false },
   }
 }

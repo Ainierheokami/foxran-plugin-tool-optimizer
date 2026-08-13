@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 import sys
 from typing import Literal
@@ -167,6 +168,30 @@ async def test_apply_rule_retries_after_model_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
     service = ToolOptimizerService(RuleStore(tmp_path))
     rule = make_rule(execution={"max_retries": 3})
+
+    result = await service.apply_rule(make_invocation(), rule)
+
+    assert calls == 2
+    assert result.parameters["prompt"] == "draw a cinematic red fox"
+    assert result.transformations[0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_rule_timeout_applies_per_attempt(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    calls = 0
+
+    async def fake_ask_model(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1)
+        return '{"updates":{"prompt":"draw a cinematic red fox"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    rule = make_rule(execution={"max_retries": 2, "timeout_ms": 500})
 
     result = await service.apply_rule(make_invocation(), rule)
 

@@ -34,6 +34,7 @@ export type OptimizationRule = {
   }
   execution: {
     timeout_ms: number
+    max_retries: number
     failure_policy: 'use_original' | 'fail_call'
     max_input_chars: number
   }
@@ -54,6 +55,7 @@ export type OptimizationRun = {
   paths: string[]
   model_name?: string | null
   duration_ms?: number | null
+  attempts?: number
   success: boolean
   error?: string
   timestamp: number

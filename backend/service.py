@@ -164,54 +164,99 @@ class ToolOptimizerService:
             "input_data": selected,
             "instruction": instruction,
         }
-        usage: dict[str, Any] = {}
         started = time.perf_counter()
-        response = await asyncio.wait_for(
-            ask_model(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "\n\n".join(
-                            item
-                            for item in (default_system, rule.optimizer.system_prompt.strip())
-                            if item
-                        ),
-                    },
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                override=ModelOverrideParams(
-                    temperature=rule.optimizer.temperature,
-                    max_tokens=rule.optimizer.max_tokens,
+        base_messages = [
+            {
+                "role": "system",
+                "content": "\n\n".join(
+                    item
+                    for item in (default_system, rule.optimizer.system_prompt.strip())
+                    if item
                 ),
-                model_names=rule.optimizer.model_selector.models or None,
-                tags=rule.optimizer.model_selector.fallback_tags or None,
-                session_ctx=invocation.session_ctx,
-                usage=usage,
-            ),
-            timeout=rule.execution.timeout_ms / 1000,
-        )
-        parsed = _parse_json_response(response)
-        updates = parsed["updates"]
-        unexpected = set(updates) - set(selected)
-        if unexpected:
-            raise ValueError(f"optimizer returned non-selected paths: {sorted(unexpected)}")
-
-        effective = deepcopy(invocation.parameters)
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        last_error: Exception | None = None
+        correction: str | None = None
+        usage: dict[str, Any] = {}
+        effective: dict[str, Any] | None = None
         changed_paths: list[str] = []
-        for path, updated in updates.items():
-            original = selected[path]
-            self._validate_target(rule, path, original, updated)
-            if updated != original:
-                _set_path(effective, path, updated)
-                changed_paths.append(path)
+        attempts = 0
+
+        for attempt in range(1, rule.execution.max_retries + 1):
+            attempts = attempt
+            messages = list(base_messages)
+            if correction:
+                messages.append({"role": "user", "content": correction})
+            attempt_usage: dict[str, Any] = {}
+            response_received = False
+            try:
+                response = await asyncio.wait_for(
+                    ask_model(
+                        messages=messages,
+                        override=ModelOverrideParams(
+                            temperature=rule.optimizer.temperature,
+                            max_tokens=rule.optimizer.max_tokens,
+                        ),
+                        model_names=rule.optimizer.model_selector.models or None,
+                        tags=rule.optimizer.model_selector.fallback_tags or None,
+                        session_ctx=invocation.session_ctx,
+                        usage=attempt_usage,
+                    ),
+                    timeout=rule.execution.timeout_ms / 1000,
+                )
+                response_received = True
+
+                parsed = _parse_json_response(response)
+                updates = parsed["updates"]
+                unexpected = set(updates) - set(selected)
+                if unexpected:
+                    raise ValueError(f"optimizer returned non-selected paths: {sorted(unexpected)}")
+
+                candidate = deepcopy(invocation.parameters)
+                candidate_changed_paths: list[str] = []
+                for path, updated in updates.items():
+                    original = selected[path]
+                    self._validate_target(rule, path, original, updated)
+                    if updated != original:
+                        _set_path(candidate, path, updated)
+                        candidate_changed_paths.append(path)
+
+                tool = tool_registry.get_tool(invocation.tool_name)
+                args_schema = getattr(tool, "args_schema", None) if tool is not None else None
+                if args_schema is not None:
+                    args_schema.model_validate(candidate)
+
+                effective = candidate
+                changed_paths = candidate_changed_paths
+                usage = attempt_usage
+                break
+            except Exception as exc:
+                last_error = exc
+                correction = None
+                if response_received:
+                    correction = (
+                        "The previous optimization attempt failed validation: "
+                        f"{type(exc).__name__}: {str(exc)[:500]}. "
+                        "Return the full JSON object again with exactly one updates object, only allowed_paths, "
+                        "the original value types, and all required URLs and references preserved."
+                    )
+                logger.warning(
+                    "Tool optimizer attempt %s/%s failed for rule %s: %s",
+                    attempt,
+                    rule.execution.max_retries,
+                    rule.id,
+                    exc,
+                )
+                if attempt < rule.execution.max_retries:
+                    await asyncio.sleep(min(0.2 * attempt, 1.0))
+
+        if effective is None:
+            assert last_error is not None
+            raise last_error
 
         if not changed_paths:
             return invocation
-
-        tool = tool_registry.get_tool(invocation.tool_name)
-        args_schema = getattr(tool, "args_schema", None) if tool is not None else None
-        if args_schema is not None:
-            args_schema.model_validate(effective)
 
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         trace = {
@@ -220,6 +265,7 @@ class ToolOptimizerService:
             "paths": changed_paths,
             "model_name": usage.get("model_name"),
             "duration_ms": duration_ms,
+            "attempts": attempts,
             "input_hash": hashlib.sha256(serialized_selected.encode("utf-8")).hexdigest()[:16],
         }
         invocation.parameters = effective
@@ -260,6 +306,7 @@ class ToolOptimizerService:
                         "paths": [],
                         "model_name": None,
                         "duration_ms": None,
+                        "attempts": rule.execution.max_retries,
                         "success": False,
                         "error": type(exc).__name__,
                         "timestamp": int(time.time()),

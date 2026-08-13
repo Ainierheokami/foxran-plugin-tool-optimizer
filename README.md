@@ -32,4 +32,5 @@ Rules are stored outside the plugin checkout under `data/extensions/tool_optimiz
 - Sensitive fields are denied.
 - Only prompt-like strings and string arrays are editable without advanced mode.
 - URLs and `url-...` capability references are preserved.
+- Model, timeout, JSON-shape, and optimized-argument validation failures retry up to three times by default.
 - Run history stores hashes and changed paths, not argument contents.

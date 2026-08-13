@@ -45,6 +45,7 @@ class ExecutionSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeout_ms: int = Field(default=15_000, ge=500, le=120_000)
+    max_retries: int = Field(default=3, ge=1, le=5)
     failure_policy: Literal["use_original", "fail_call"] = "use_original"
     max_input_chars: int = Field(default=12_000, ge=100, le=200_000)
 
