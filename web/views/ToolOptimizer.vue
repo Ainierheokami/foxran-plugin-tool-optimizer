@@ -273,6 +273,7 @@ import {
   deleteRule, getCatalog, listRules, listRuns, previewRule, saveRule,
   type ModelCatalogItem, type OptimizationRule, type OptimizationRun, type ToolCatalogItem,
 } from '../services/optimizer'
+import { buildExampleParameters, isStringArraySchema, schemaType, schemaTypeLabel } from '../services/schemaExamples'
 
 type ParameterField = { path: string; type: string; description: string; safe: boolean }
 const props = withDefaults(defineProps<{ demoMode?: boolean }>(), { demoMode: false })
@@ -347,12 +348,12 @@ function flattenSchema(schema: Record<string, any>, prefix = ''): ParameterField
   const properties = schema?.properties || {}
   return Object.entries(properties).flatMap(([name, raw]: [string, any]) => {
     const path = prefix ? `${prefix}.${name}` : name
-    const type = raw.type || raw.anyOf?.map((item: any) => item.type).filter(Boolean).join(' | ') || 'unknown'
+    const type = schemaType(raw)
     if ((type === 'object' || raw.properties) && raw.properties) return flattenSchema(raw, path)
     const leaf = name.toLowerCase()
-    const arrayOfStrings = type === 'array' && raw.items?.type === 'string'
+    const arrayOfStrings = isStringArraySchema(raw)
     const safe = (type === 'string' || arrayOfStrings) && (promptNames.has(leaf) || [...promptNames].some((part) => leaf.includes(part)))
-    return [{ path, type: arrayOfStrings ? 'string[]' : type, description: raw.description || '', safe }]
+    return [{ path, type: schemaTypeLabel(raw), description: raw.description || '', safe }]
   })
 }
 
@@ -377,10 +378,26 @@ function handleToolChange() {
   seedRawParameters()
 }
 
-function seedRawParameters() {
-  const payload: Record<string, any> = {}
-  for (const field of parameterFields.value) {
-    if (!field.path.includes('.')) payload[field.path] = field.type === 'string[]' ? ['示例内容'] : field.type === 'string' ? '示例内容' : null
+function mergeMissing(target: Record<string, any>, defaults: Record<string, any>) {
+  for (const [key, value] of Object.entries(defaults)) {
+    if (!(key in target)) target[key] = value
+    else if (
+      target[key] && value && typeof target[key] === 'object' && typeof value === 'object'
+      && !Array.isArray(target[key]) && !Array.isArray(value)
+    ) mergeMissing(target[key], value)
+  }
+  return target
+}
+
+function seedRawParameters(preserveExisting = false) {
+  const preferredPaths = draft.value?.targets.map((target) => target.path) || []
+  const seeded = buildExampleParameters(selectedTool.value?.input_schema || {}, preferredPaths)
+  let payload = seeded
+  if (preserveExisting) {
+    try {
+      const current = JSON.parse(rawParameterText.value)
+      if (current && typeof current === 'object' && !Array.isArray(current)) payload = mergeMissing(current, seeded)
+    } catch { /* Invalid JSON remains visible and will be reported by preview. */ }
   }
   rawParameterText.value = JSON.stringify(payload, null, 2)
 }
@@ -390,7 +407,10 @@ function toggleTarget(path: string) {
   if (!draft.value) return
   const index = draft.value.targets.findIndex((target) => target.path === path)
   if (index >= 0) draft.value.targets.splice(index, 1)
-  else draft.value.targets.push({ path, mode: 'rewrite' })
+  else {
+    draft.value.targets.push({ path, mode: 'rewrite' })
+    seedRawParameters(true)
+  }
 }
 
 async function loadData() {

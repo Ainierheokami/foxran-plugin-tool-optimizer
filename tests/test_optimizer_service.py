@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import sys
+from typing import Literal
 
 import pytest
+from fastapi import HTTPException
+from pydantic import BaseModel
 
 from app.tools.interceptors import ToolInvocation
 from app.tools.interceptors import tool_interceptor_registry
 from foxran_tool_optimizer_test.backend.schemas import OptimizationRule
+from foxran_tool_optimizer_test.backend.schemas import PreviewRequest
 from foxran_tool_optimizer_test.backend.service import ToolOptimizerService
 from foxran_tool_optimizer_test.backend.store import RuleStore
+from foxran_tool_optimizer_test.backend.api import _validate_preview_parameters
 
 
 def make_rule(**overrides):
@@ -52,6 +57,75 @@ def test_rule_store_round_trip(tmp_path):
     assert [rule.id for rule in loaded] == ["image-prompt"]
     assert store.delete_rule("image-prompt") is True
     assert store.list_rules() == []
+
+
+def test_preview_rejects_invalid_tool_parameters_before_model_call():
+    class VideoArgs(BaseModel):
+        prompt: str
+        duration: int = 5
+        format: Literal["mp4", "gif"] = "mp4"
+
+    tool = SimpleNamespace(args_schema=VideoArgs)
+
+    with pytest.raises(HTTPException) as captured:
+        _validate_preview_parameters(
+            tool,
+            {"prompt": "generate a video", "duration": None, "format": "example"},
+        )
+
+    assert captured.value.status_code == 422
+    assert "duration" in captured.value.detail
+    assert "format" in captured.value.detail
+
+
+def test_preview_accepts_omitted_optional_parameters_with_schema_defaults():
+    class VideoArgs(BaseModel):
+        prompt: str
+        duration: int = 5
+        format: Literal["mp4", "gif"] = "mp4"
+
+    _validate_preview_parameters(
+        SimpleNamespace(args_schema=VideoArgs),
+        {"prompt": "generate a video"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_preview_optimizes_parameters_without_executing_target_tool(monkeypatch):
+    from foxran_tool_optimizer_test.backend import api as api_module
+
+    class PreviewArgs(BaseModel):
+        prompt: str
+
+    class PreviewOnlyTool:
+        args_schema = PreviewArgs
+
+        @staticmethod
+        def get_input_schema_for_llm():
+            return PreviewArgs.model_json_schema()
+
+        async def execute(self, **_kwargs):
+            raise AssertionError("preview must not execute the target tool")
+
+    async def fake_apply_rule(invocation, _rule):
+        invocation.parameters = {"prompt": "optimized prompt"}
+        invocation.transformations.append({"paths": ["prompt"]})
+        return invocation
+
+    monkeypatch.setattr(api_module.tool_registry, "get_tool", lambda _name: PreviewOnlyTool())
+    monkeypatch.setattr(api_module.optimizer_service, "apply_rule", fake_apply_rule)
+
+    response = await api_module.preview(
+        PreviewRequest(
+            rule=make_rule(),
+            tool_name="image_generation",
+            parameters={"prompt": "original prompt"},
+        ),
+        True,
+    )
+
+    assert response["raw_parameters"] == {"prompt": "original prompt"}
+    assert response["effective_parameters"] == {"prompt": "optimized prompt"}
 
 
 @pytest.mark.asyncio

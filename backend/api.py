@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import ValidationError
 
 from app.api.endpoints.auth import require_auth
 from app.config import load_model_configs
@@ -15,6 +16,27 @@ from .service import optimizer_service
 
 
 router = APIRouter(prefix="/api/tool-optimizer", tags=["tool-optimizer"])
+
+
+def _validation_detail(prefix: str, exc: ValidationError) -> str:
+    issues = []
+    for item in exc.errors(include_url=False):
+        location = ".".join(str(part) for part in item.get("loc", ())) or "parameters"
+        issues.append(f"{location}: {item.get('msg', 'invalid value')}")
+    return f"{prefix}：" + "；".join(issues)
+
+
+def _validate_preview_parameters(tool, parameters: dict) -> None:
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is None:
+        return
+    try:
+        args_schema.model_validate(parameters)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_validation_detail("原始工具参数无效", exc),
+        ) from exc
 
 
 @router.get("/catalog")
@@ -69,6 +91,7 @@ async def preview(request: PreviewRequest, _: bool = Depends(require_auth)):
     tool = tool_registry.get_tool(request.tool_name)
     if tool is None:
         raise HTTPException(status_code=404, detail="工具不存在")
+    _validate_preview_parameters(tool, request.parameters)
     invocation = ToolInvocation(
         call_id="preview",
         tool_name=request.tool_name,
@@ -81,8 +104,11 @@ async def preview(request: PreviewRequest, _: bool = Depends(require_auth)):
     )
     try:
         result = await optimizer_service.apply_rule(invocation, request.rule)
-        if result.transformations and getattr(tool, "args_schema", None):
-            tool.args_schema.model_validate(result.parameters)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=_validation_detail("优化后的工具参数无效", exc),
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
