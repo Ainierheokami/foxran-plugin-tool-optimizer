@@ -1,0 +1,23 @@
+manifest_version: 1
+
+extension:
+  id: "tool_optimizer"
+  name: "Tool Parameter Optimizer"
+  version: "1.0.0"
+  type: "tool"
+  description: "Optimizes selected tool arguments through configurable model-backed middleware rules."
+  author: "Ainierheokami"
+  repository: "https://github.com/Ainierheokami/foxran-plugin-tool-optimizer"
+  tags:
+    - "middleware"
+    - "prompt"
+    - "optimizer"
+    - "webui"
+
+compatibility:
+  foxran: ">=1.1.0"
+  python: ">=3.10"
+
+tool:
+  entry: "__init__.py"
+  frontend_bundle: "index.umd.js"
