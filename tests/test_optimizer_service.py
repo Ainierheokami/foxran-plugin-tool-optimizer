@@ -152,10 +152,62 @@ async def test_apply_rule_only_updates_selected_path(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_apply_rule_retries_after_model_failure(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    calls = 0
+
+    async def fake_ask_model(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary upstream failure")
+        return '{"updates":{"prompt":"draw a cinematic red fox"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    rule = make_rule(execution={"max_retries": 3})
+
+    result = await service.apply_rule(make_invocation(), rule)
+
+    assert calls == 2
+    assert result.parameters["prompt"] == "draw a cinematic red fox"
+    assert result.transformations[0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_rule_retries_invalid_json_with_correction(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    captured_messages = []
+
+    async def fake_ask_model(*, messages, **_kwargs):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return "not-json"
+        return '{"updates":{"prompt":"draw a cinematic red fox"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    rule = make_rule(execution={"max_retries": 3})
+
+    result = await service.apply_rule(make_invocation(), rule)
+
+    assert len(captured_messages) == 2
+    assert "previous optimization attempt failed validation" in captured_messages[1][-1]["content"]
+    assert result.parameters["prompt"] == "draw a cinematic red fox"
+    assert result.transformations[0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
 async def test_optimize_fail_open_uses_original_parameters(monkeypatch, tmp_path):
     from foxran_tool_optimizer_test.backend import service as service_module
 
+    calls = 0
+
     async def fake_ask_model(**_kwargs):
+        nonlocal calls
+        calls += 1
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
@@ -167,6 +219,7 @@ async def test_optimize_fail_open_uses_original_parameters(monkeypatch, tmp_path
 
     assert result.parameters == {"prompt": "draw a fox", "width": 1024}
     assert result.transformations == []
+    assert calls == 3
     assert service.list_recent_runs()[0]["success"] is False
 
 
