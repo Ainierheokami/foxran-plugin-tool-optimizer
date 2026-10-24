@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,7 +13,7 @@ from app.tools.interceptors import ToolInvocation
 from app.tools.registry import tool_registry
 
 from .schemas import OptimizationRule, PreviewRequest
-from .service import optimizer_service
+from .service import OPTIMIZE_BUDGET_SECONDS, optimizer_service
 
 
 router = APIRouter(prefix="/api/tool-optimizer", tags=["tool-optimizer"])
@@ -103,7 +104,11 @@ async def preview(request: PreviewRequest, _: bool = Depends(require_auth)):
         metadata={"skip_tool_interceptors": True},
     )
     try:
-        result = await optimizer_service.apply_rule(invocation, request.rule)
+        result = await optimizer_service.apply_rule(
+            invocation,
+            request.rule,
+            deadline=time.monotonic() + OPTIMIZE_BUDGET_SECONDS,
+        )
     except ValidationError as exc:
         raise HTTPException(
             status_code=400,

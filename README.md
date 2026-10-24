@@ -31,6 +31,9 @@ Rules are stored outside the plugin checkout under `data/extensions/tool_optimiz
 - Fail-open per rule unless `fail_call` is selected.
 - Sensitive fields are denied.
 - Only prompt-like strings and string arrays are editable without advanced mode.
-- URLs and `url-...` capability references are preserved.
+- URLs and `url-...` capability references are preserved; a URL ends at CJK text or full-width punctuation.
 - Model, timeout, JSON-shape, and optimized-argument validation failures retry up to three times by default.
+- Field checks (sensitive, prompt-like, value type) run before the model call and are never retried.
+- All matching rules share one time budget kept below the host interceptor timeout, so `use_original` still applies when it runs out.
+- A rule without a tool filter skips tools that lack its target fields instead of failing.
 - Run history stores hashes and changed paths, not argument contents.

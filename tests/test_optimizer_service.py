@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 import sys
 from typing import Literal
@@ -108,7 +109,7 @@ async def test_preview_optimizes_parameters_without_executing_target_tool(monkey
         async def execute(self, **_kwargs):
             raise AssertionError("preview must not execute the target tool")
 
-    async def fake_apply_rule(invocation, _rule):
+    async def fake_apply_rule(invocation, _rule, **_kwargs):
         invocation.parameters = {"prompt": "optimized prompt"}
         invocation.transformations.append({"paths": ["prompt"]})
         return invocation
@@ -220,6 +221,7 @@ async def test_apply_rule_retries_invalid_json_with_correction(monkeypatch, tmp_
 
     assert len(captured_messages) == 2
     assert "previous optimization attempt failed validation" in captured_messages[1][-1]["content"]
+    assert captured_messages[1][-2] == {"role": "assistant", "content": "not-json"}
     assert result.parameters["prompt"] == "draw a cinematic red fox"
     assert result.transformations[0]["attempts"] == 2
 
@@ -267,7 +269,11 @@ async def test_guardrail_rejects_removed_url(monkeypatch, tmp_path):
 async def test_non_prompt_field_requires_advanced_mode(monkeypatch, tmp_path):
     from foxran_tool_optimizer_test.backend import service as service_module
 
+    calls = 0
+
     async def fake_ask_model(**_kwargs):
+        nonlocal calls
+        calls += 1
         return '{"updates":{"width":2048}}'
 
     monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
@@ -276,6 +282,10 @@ async def test_non_prompt_field_requires_advanced_mode(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="not prompt-like"):
         await service.apply_rule(make_invocation(), rule)
+
+    # The field check cannot change between attempts, so no model call is spent on it.
+    assert calls == 0
+    assert service.list_recent_runs()[0]["attempts"] == 0
 
 
 @pytest.mark.asyncio
@@ -309,3 +319,146 @@ async def test_corrupt_rule_file_fails_open(tmp_path):
 
     assert result is invocation
     assert result.parameters == {"prompt": "draw a fox", "width": 1024}
+
+
+def test_extract_urls_stops_at_cjk_text_and_trailing_punctuation():
+    from foxran_tool_optimizer_test.backend.service import _extract_urls
+
+    assert _extract_urls("参考 https://a.test/cat.png，画一只猫") == {"https://a.test/cat.png"}
+    assert _extract_urls("见https://a.test/x。然后") == {"https://a.test/x"}
+    assert _extract_urls("see (https://a.test/x).") == {"https://a.test/x"}
+    assert _extract_urls("https://a.test/wiki/Fox_(animal)") == {"https://a.test/wiki/Fox_(animal)"}
+
+
+@pytest.mark.asyncio
+async def test_guardrail_allows_rewriting_cjk_text_next_to_url(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    async def fake_ask_model(**_kwargs):
+        return '{"updates":{"prompt":"参考 https://a.test/cat.png，画一只毛色蓬松的橘猫"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+
+    result = await service.apply_rule(make_invocation("参考 https://a.test/cat.png，画一只猫"), make_rule())
+
+    assert result.parameters["prompt"] == "参考 https://a.test/cat.png，画一只毛色蓬松的橘猫"
+
+
+@pytest.mark.asyncio
+async def test_rule_without_tool_filter_skips_tools_missing_the_field(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    async def fake_ask_model(**_kwargs):
+        raise AssertionError("no selected field, so no model call")
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    store = RuleStore(tmp_path)
+    store.save_rule(
+        make_rule(
+            match={"tools": [], "sources": []},
+            targets=[{"path": "query", "mode": "rewrite"}],
+            execution={"failure_policy": "fail_call"},
+        )
+    )
+    service = ToolOptimizerService(store)
+
+    result = await service.optimize(make_invocation())
+
+    assert result.parameters == {"prompt": "draw a fox", "width": 1024}
+    assert service.list_recent_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_rule_with_tool_filter_still_requires_rewrite_target(tmp_path):
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    rule = make_rule(targets=[{"path": "query", "mode": "rewrite"}])
+
+    with pytest.raises(ValueError, match="required target does not exist"):
+        await service.apply_rule(make_invocation(), rule)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_budget_stops_retries_and_falls_back(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    calls = 0
+
+    async def fake_ask_model(**_kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+        return '{"updates":{"prompt":"never used"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    monkeypatch.setattr(service_module, "OPTIMIZE_BUDGET_SECONDS", 0.3)
+    store = RuleStore(tmp_path)
+    store.save_rule(make_rule(execution={"max_retries": 5, "timeout_ms": 10_000}))
+    service = ToolOptimizerService(store)
+
+    result = await asyncio.wait_for(service.optimize(make_invocation()), timeout=2)
+
+    assert result.parameters == {"prompt": "draw a fox", "width": 1024}
+    assert calls == 1
+    run = service.list_recent_runs()[0]
+    assert run["success"] is False
+    assert run["error"] == "OptimizerBudgetExceeded"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_result_is_recorded_as_run(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    async def fake_ask_model(*, usage, **_kwargs):
+        usage["model_name"] = "optimizer-model"
+        return '{"updates":{"prompt":"draw a fox"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    invocation = make_invocation()
+
+    result = await service.apply_rule(invocation, make_rule())
+
+    assert result.transformations == []
+    run = service.list_recent_runs()[0]
+    assert run["success"] is True
+    assert run["paths"] == []
+    assert run["attempts"] == 1
+    assert run["model_name"] == "optimizer-model"
+
+
+@pytest.mark.asyncio
+async def test_array_index_path_and_schema_subset(monkeypatch, tmp_path):
+    from foxran_tool_optimizer_test.backend import service as service_module
+
+    captured = {}
+
+    async def fake_ask_model(*, messages, **_kwargs):
+        captured["payload"] = json.loads(messages[1]["content"])
+        return '{"updates":{"positive_prompts.1":"a misty pine forest"}}'
+
+    monkeypatch.setattr(service_module, "ask_model", fake_ask_model)
+    service = ToolOptimizerService(RuleStore(tmp_path))
+    invocation = make_invocation()
+    invocation.parameters = {"positive_prompts": ["a fox", "forest"], "width": 1024}
+    invocation.tool_schema["properties"]["positive_prompts"] = {"type": "array", "items": {"type": "string"}}
+    rule = make_rule(targets=[{"path": "positive_prompts.1", "mode": "rewrite"}])
+
+    result = await service.apply_rule(invocation, rule)
+
+    assert result.parameters["positive_prompts"] == ["a fox", "a misty pine forest"]
+    assert list(captured["payload"]["tool"]["schema"]["properties"]) == ["positive_prompts"]
+
+
+def test_active_rules_skip_invalid_entries_and_refresh_after_save(tmp_path):
+    store = RuleStore(tmp_path)
+    store.ensure_storage()
+    valid = make_rule().model_dump(mode="json")
+    store.rules_path.write_text(json.dumps([{"id": "broken"}, valid]), encoding="utf-8")
+
+    assert [rule.id for rule in store.load_active_rules()] == ["image-prompt"]
+
+    store.rules_path.write_text(json.dumps([valid]), encoding="utf-8")
+    store.save_rule(make_rule(id="second", priority=200))
+
+    assert [rule.id for rule in store.load_active_rules()] == ["image-prompt", "second"]

@@ -4,7 +4,7 @@ from app.logger import setup_logger
 from app.tools.interceptors import tool_interceptor_registry
 
 from .backend.api import router
-from .backend.service import optimizer_service
+from .backend.service import INTERCEPTOR_TIMEOUT_MS, optimizer_service
 
 
 logger = setup_logger(__name__)
@@ -26,7 +26,7 @@ async def enable() -> None:
         name=INTERCEPTOR_NAME,
         callback=_before_tool_execute,
         priority=100,
-        timeout_ms=300_000,
+        timeout_ms=INTERCEPTOR_TIMEOUT_MS,
         failure_policy="fail_call",
     )
     logger.info("Tool optimizer plugin enabled")
